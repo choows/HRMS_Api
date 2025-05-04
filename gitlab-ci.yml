@@ -1,0 +1,85 @@
+variables:
+  API_RELEASE_FOLDER: 'HRMS_Api/bin/Release/net9.0'
+  TEST_RELEASE_FOLDER: 'HRMS_ApiTests/bin/Release/net9.0'
+  DOTNET_CLI_HOME: '/root'
+  TEST_RESULTS_PATH: './TestResults'
+  SONAR_USER_HOME: "${CI_PROJECT_DIR/.sonar}"
+  GIT_DEPTH: "0"
+
+stages:
+  - build
+  - test
+  - sonarqube_job
+  
+build_job:
+  stage: build
+  image: mcr.microsoft.com/dotnet/sdk:9.0
+  script:
+    - 'dotnet restore'
+    - 'dotnet build --configuration Release'
+  artifacts:
+    expire_in: 1 week
+    paths:
+      - '*/bin/Release/net9.0/'
+
+test_job:
+  stage: test
+  image: mcr.microsoft.com/dotnet/sdk:9.0
+  before_script:
+    # Install the tool and make it accessible in PATH
+    - 'dotnet tool install -g dotnet-reportgenerator-globaltool'
+    - 'export PATH="$PATH:/root/.dotnet/tools"'
+    - 'mkdir -p $TEST_RESULTS_PATH'
+  script:
+    - dotnet restore
+    # Ensure package is present (should already be in csproj)
+    - dotnet list HRMS_ApiTests package
+    
+    # Run tests with coverage
+    - dotnet test HRMS_ApiTests/HRMS_ApiTests.csproj --configuration Release --no-build --collect:"XPlat Code Coverage" --logger:"console;verbosity=detailed" --results-directory:$TEST_RESULTS_PATH
+
+    # Debugging: list all generated files
+    - echo "=== Files generated ==="
+    - find $TEST_RESULTS_PATH -type f
+
+    # Generate report if found
+    - reportgenerator -reports:$TEST_RESULTS_PATH/**/coverage.cobertura.xml -targetdir:$TEST_RESULTS_PATH/CoverageReport -reporttypes:Cobertura;
+
+  dependencies:
+    - build_job
+  artifacts:
+    when: always
+    paths:
+      - '$TEST_RESULTS_PATH'
+    reports:
+      junit: $TEST_RESULTS_PATH/*.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: $TEST_RESULTS_PATH/CoverageReport/Cobertura.xml
+
+sonarqube_job:
+  stage: sonarqube_job
+  image: mcr.microsoft.com/dotnet/sdk:9.0
+  variables:
+    SONAR_SCANNER_VERSION: 5.15.0
+  before_script:
+    - apt-get update && apt-get install -y openjdk-17-jdk
+    - dotnet tool install --global dotnet-sonarscanner --version $SONAR_SCANNER_VERSION
+    - dotnet tool install --global coverlet.console
+    - export PATH="$PATH:/root/.dotnet/tools"
+  script:
+    - coverlet $TEST_RELEASE_FOLDER/HRMS_ApiTests.dll --target "dotnet" --targetargs "test HRMS_ApiTests/HRMS_ApiTests.csproj --no-build --configuration Release" --format opencover --output "$TEST_RESULTS_PATH/coverage.xml"
+    - dotnet sonarscanner begin /k:"wsChoo_HRMS_projects" /o:"wschoo" /d:sonar.host.url="https://sonarcloud.io" /d:sonar.token="$SONAR_TOKEN" /d:sonar.cs.opencover.reportsPaths=$TEST_RESULTS_PATH/coverage.xml
+    - dotnet build
+    - dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
+  only:
+    - merge_requests
+    - master
+    - develop
+  dependencies:
+    - build_job
+    - test_job
+  artifacts:
+    when: always
+    paths:
+      - $TEST_RESULTS_PATH
